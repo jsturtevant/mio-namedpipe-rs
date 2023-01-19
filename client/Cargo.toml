@@ -1,0 +1,19 @@
+[package]
+name = "client"
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+mio = { version = "0.8", features= ["os-ext",  "os-poll"] }
+
+[dependencies.windows-sys] 
+version = "0.42"
+features = [
+  "Win32_Foundation",                 # Basic types eg HANDLE
+  "Win32_Networking_WinSock",         # winsock2 types/functions
+  "Win32_Storage_FileSystem",         # Enables NtCreateFile
+  "Win32_System_IO",                  # IO types like OVERLAPPED etc
+  "Win32_System_WindowsProgramming",  # General future used for various types/funcs
+]
