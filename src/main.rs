@@ -57,37 +57,57 @@ fn waitForConnection(server: NamedPipe) -> io::Result<NamedPipe> {
       
                 thread::spawn(move || {
                     let mut currentServer = currentHandle;
-                    poll.registry().reregister(&mut currentServer, SERVER, Interest::READABLE |  Interest::WRITABLE).unwrap();
 
-                    poll.poll(&mut events, Some(Duration::new(10, 0))).unwrap();
+                    let mut count = 0;
+                    loop {
+                        poll.registry().reregister(&mut currentServer, SERVER, Interest::READABLE).unwrap();
+                        poll.poll(&mut events, None).unwrap();
 
-                    let mut buf = [0; 10];
-                    currentServer.read(&mut buf);
-                    print!("read: {:?}", buf);
-                
-                    match currentServer.write(b"1234"){
-                        Ok(_) => println!("Wrote to pipe"),
-                        Err(e) => println!("Error writing to pipe: {}", e),
+                        let mut buf = [0; 10];
+                        match currentServer.read(&mut buf) {
+                            Ok(0) => {
+                                continue;
+                            },
+                            Ok(_) => {
+                                print!("read: {:?}",  std::str::from_utf8(&buf));
+                            },
+                            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                                continue;
+                            },
+                            Err(e) => {
+                                println!("Error reading from pipe: {}", e);
+                            }
+                        }
+
+                        poll.registry().reregister(&mut currentServer, SERVER, Interest::WRITABLE).unwrap();
+
+                        count += 1;
+                        loop {
+                            let message = format!("pong-{value}", value=count);
+                            match currentServer.write(message.as_bytes()) {
+                                Ok(_) => {
+                                    println!("Wrote to pipe");
+                                    break;
+                                },
+                                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                                    poll.poll(&mut events, None).unwrap();
+                                },
+                                Err(e) => {
+                                    println!("Error writing to pipe: {}", e);
+                                } 
+                            }
+                        }
+                        
+                        if count == 10 {
+                            print!("killing client connection");
+                            io::stdout().flush();
+                            currentServer.disconnect();
+                            drop(currentServer);
+                            break;
+                        }
+                        
                     }
                 
-                    let mut events = Events::with_capacity(128);
-                    poll.poll(&mut events, Some(Duration::new(1, 0))).unwrap();
-                
-                    match currentServer.write(b"test end") {
-                        Ok(_) => {
-                            println!("Wrote to pipe2");
-                        },
-                        Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                            println!("waiting for client!");
-                        },
-                        Err(e) => {
-                            println!("Error writing to pipe: {}", e);
-                        } 
-                    }
-                
-                    std::thread::sleep(std::time::Duration::from_secs(5));
-                    currentServer.disconnect();
-
                     print!("disconnecting");
                     io::stdout().flush();
                 });

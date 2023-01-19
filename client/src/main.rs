@@ -34,53 +34,61 @@ fn main() -> Result<(), Box<dyn Error>>{
        
     let mut events = Events::with_capacity(128);
 
-    poll.poll(&mut events, Some(Duration::new(1, 0)))?;
+    // initiate ping/pong
+    poll.poll(&mut events, None)?;
     match client.write(b"ping") {
         Ok(_) => println!("Wrote to pipe"),
         Err(e) => println!("Error writing to pipe: {}", e),
     }
 
+    let mut count = 0;
     'outer: loop {
-        poll.poll(&mut events, Some(Duration::new(1, 0)))?;
+        poll.registry().reregister(&mut client, Token(1), Interest::READABLE)?;
+        poll.poll(&mut events, None).unwrap();
 
-        for event in events.iter() {
-            
-            // We can use the token we previously provided to `register` to
-            // determine for which socket the event is.
-            match event.token() {
-                Token(1) => {
-                    if event.is_readable() {
-                        println!("readable! {:?}", event);
-                        let mut buf = [0; 10];
-                        match client.read(&mut buf) {
-                            Ok(0) =>
-                            {
-                                println!("Read zero from pipe");
-                                break 'outer;
-                            },
-                            Ok(_) => {
-                                // print string representation of buffer
-                                println!("Read from pipe: {:?}", std::str::from_utf8(&buf));
-                            },
-                            
-                            Err(e) if e.raw_os_error() == Some(ERROR_PIPE_NOT_CONNECTED as i32) =>
-                            {
-                                println!("no process: {}", e);
+        let mut buf = [0; 10];
+        match client.read(&mut buf) {
+            Ok(0) =>
+            {
+                println!("Read zero from pipe");
+                continue;
+            },
+            Ok(_) => {
+                println!("Read from pipe: {:?}", std::str::from_utf8(&buf));
+            },
+            Err(e) if e.raw_os_error() == Some(ERROR_PIPE_NOT_CONNECTED as i32) =>
+            {
+                println!("no process: {}", e);
 
-                                break 'outer;
-                            },
-                            Err(e) => println!("Error reading from pipe: {}", e),
-                        }
-                        
-                       
-                    }
-                    
-                }
-                _ => panic!("unexpected token"),
-            }
+                break 'outer;
+            },
+            Err(e) => println!("Error reading from pipe: {}", e),
         }
 
-        events.clear()
+        std::thread::sleep(std::time::Duration::from_secs(1));
+        poll.registry().reregister(&mut client, Token(1), Interest::WRITABLE).unwrap();
+        count += 1;
+        loop {
+            let message = format!("ping-{value}", value=count);
+            match client.write(message.as_bytes()) {
+                Ok(_) => {
+                    println!("Wrote to pipe");
+                    break;
+                },
+                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                    poll.poll(&mut events, None).unwrap();
+                },
+                Err(e) if e.raw_os_error() == Some(ERROR_PIPE_NOT_CONNECTED as i32) =>
+                {
+                    println!("no process: {}", e);
+
+                    break 'outer;
+                },
+                Err(e) => {
+                    println!("Error writing to pipe: {}", e);
+                } 
+            }
+        }
     }
 
     Ok(())
