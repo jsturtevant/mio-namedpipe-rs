@@ -16,8 +16,6 @@ use windows_sys::Win32::System::Pipes::{
     CreateNamedPipeW, PIPE_TYPE_BYTE, PIPE_UNLIMITED_INSTANCES
 };
 
-
-
 use windows_sys::Win32::Foundation::{
     INVALID_HANDLE_VALUE, ERROR_NO_DATA
 };
@@ -28,13 +26,11 @@ use windows_sys::Win32::Storage::FileSystem::{
 const PIPE_NAME: &str = r"\\.\pipe\mio-named-pipe-test";
 const SERVER: Token = Token(0);
 
-//const SYNCHRONIZE: u32 = 1048576u32;
-
 fn main() {
     println!("Hello, server!");
 
     let mut server = PipeServer{
-        first: None,
+        firstInstance: None,
     };
 
     loop{
@@ -78,15 +74,9 @@ fn start_handler<T: Connection+ 'static> (con: T) -> thread::JoinHandle<()>
     h
 }
 
-
-
-
-
-
-
 // do I do clone and Arc's here?
 struct PipeServer {
-    first: Option<bool>,
+    firstInstance: Option<bool>,
 }
 
 impl PipeServer {
@@ -124,21 +114,6 @@ impl PipeServer {
         }
     }
 }
-
-// impl PipeServer {
-//     fn Poller(&mut self) -> &Poll {
-//         match self.poll {
-//             Some(p) => {
-//                 return &p;
-//             }
-//             None => {
-                
-//                 self.poll = Some(poll);
-//                 return &self.poll.unwrap();
-//             }
-//         }
-//     }
-// }
 
 struct pipeinstance {
     namedPipe: NamedPipe,
@@ -223,12 +198,12 @@ impl Listener for PipeServer {
     type Type = pipeinstance;
     fn Accept(&mut self) -> Result<Self::Type, io::Error> {
         let mut pipe;
-        match self.first {
+        match self.firstInstance {
             Some(_) => {
                  pipe = PipeServer::new(PIPE_NAME, false, std::ptr::null_mut()).unwrap();
             }
             None => {
-                self.first = Some(true);
+                self.firstInstance = Some(true);
                 pipe = PipeServer::new(PIPE_NAME, true, std::ptr::null_mut()).unwrap();
             }
         }
@@ -266,10 +241,8 @@ trait Listener {
     fn Accept(&mut self) -> Result<Self::Type, io::Error>;
 }
 
-
 trait Close {
     fn close(&mut self) -> io::Result<()>;
 }
 
 trait Connection: Close + Read + Write + Send + std::marker::Sync {}
-
