@@ -29,9 +29,7 @@ const SERVER: Token = Token(0);
 fn main() {
     println!("Hello, server!");
 
-    let mut server = PipeServer{
-        firstInstance: None,
-    };
+    let mut server = PipeServer::new(PIPE_NAME);
 
     loop{
         let con = server.Accept().unwrap();
@@ -75,18 +73,34 @@ fn start_handler<T: Connection+ 'static> (con: T) -> thread::JoinHandle<()>
 }
 
 // do I do clone and Arc's here?
-struct PipeServer {
+struct PipeServer<'a> {
     firstInstance: Option<bool>,
+    address: &'a str,
 }
 
-impl PipeServer {
-    fn new<A: AsRef<OsStr>>(addr: A, first: bool, _attrs: *mut c_void) -> io::Result<pipeinstance> {
-        let name: Vec<_> = addr.as_ref().encode_wide().chain(Some(0)).collect();
+impl PipeServer<'_> {
+    fn new(addr:&str) -> PipeServer {
+        PipeServer {
+            firstInstance: None,
+            address: addr,
+        }
+    }
+
+    fn new_instance(&mut self) -> io::Result<pipeinstance> {
+        let name = OsStr::new(self.address)
+            .encode_wide()
+            .chain(Some(0)) // add NULL termination
+            .collect::<Vec<_>>();
     
         // bitwise or file_flag_first_pipe_instance with file_flag_overlapped and pipe_access_duplex
         let mut openmode = PIPE_ACCESS_DUPLEX | FILE_FLAG_OVERLAPPED;
-        if first {
-            openmode |= FILE_FLAG_FIRST_PIPE_INSTANCE;
+
+        match self.firstInstance {
+            Some(_) => {},
+            None => {
+                self.firstInstance = Some(true);
+                openmode |= FILE_FLAG_FIRST_PIPE_INSTANCE
+            }
         }
     
         // Safety: syscall
@@ -99,7 +113,7 @@ impl PipeServer {
                 65536,
                 65536,
                 0,
-                std::ptr::null_mut(),
+                std::ptr::null_mut(), // todo set this on first instance
             )
         };
     
@@ -194,19 +208,10 @@ impl Close for pipeinstance {
 
 impl Connection for pipeinstance {}
 
-impl Listener for PipeServer {
+impl Listener for PipeServer<'_> {
     type Type = pipeinstance;
     fn Accept(&mut self) -> Result<Self::Type, io::Error> {
-        let mut pipe;
-        match self.firstInstance {
-            Some(_) => {
-                 pipe = PipeServer::new(PIPE_NAME, false, std::ptr::null_mut()).unwrap();
-            }
-            None => {
-                self.firstInstance = Some(true);
-                pipe = PipeServer::new(PIPE_NAME, true, std::ptr::null_mut()).unwrap();
-            }
-        }
+        let mut pipe = self.new_instance().unwrap();
 
         pipe.poll.registry()
         .register(&mut pipe.namedPipe, SERVER, Interest::WRITABLE)
