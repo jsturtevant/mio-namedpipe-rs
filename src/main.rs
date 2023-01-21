@@ -233,6 +233,10 @@ impl Listener for PipeServer {
             }
         }
 
+        pipe.poll.registry()
+        .register(&mut pipe.namedPipe, SERVER, Interest::WRITABLE)
+        .unwrap();
+
         println!("waiting for connection....");
         loop {
             match pipe.namedPipe.connect() {
@@ -242,7 +246,7 @@ impl Listener for PipeServer {
                 },
                 Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
                     pipe.poll.registry()
-                        .register(&mut pipe.namedPipe, SERVER, Interest::WRITABLE)
+                        .reregister(&mut pipe.namedPipe, SERVER, Interest::WRITABLE)
                         .unwrap();
     
                     let mut events = Events::with_capacity(1024);
