@@ -1,9 +1,11 @@
 // use std::io::Read;
 // use std::io::{Read, Write};
 
+use mio::event::Event;
 use mio::windows::NamedPipe;
 
-use mio::{Events, Interest, Poll, Token};
+use mio::{Events, Interest, Poll, Token, Registry};
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::ffi::c_void;
 use std::io::{self, Read, Write};
@@ -12,6 +14,7 @@ use std::ffi::OsStr;
 use std::os::windows::ffi::OsStrExt;
 use std::os::windows::io::{FromRawHandle, RawHandle, AsRawHandle};
 use std::thread;
+use std::time::Duration;
 use windows_sys::Win32::System::Pipes::{
     CreateNamedPipeW, PIPE_TYPE_BYTE, PIPE_UNLIMITED_INSTANCES
 };
@@ -29,50 +32,153 @@ const SERVER: Token = Token(0);
 fn main() {
     println!("Hello, server!");
 
-    let mut server = PipeServer::new(PIPE_NAME);
+    let mut namedpipe = PipeServer::new(PIPE_NAME);
+
+    let mut server = namedpipe.new_instance().unwrap();
+
+
+    let mut poll = Poll::new().unwrap();
+
+    let mut events = Events::with_capacity(128);
+
+
+    poll.registry()
+    .register(&mut server, SERVER, Interest::WRITABLE).unwrap();
+
+    let mut connections = HashMap::new();
+    // Unique token for each incoming connection.
+    let mut unique_token = Token(SERVER.0 + 1);
 
     loop{
-        let con = server.Accept().unwrap();
+        match server.connect() {
+            Ok(()) => {
+                println!("Connected to client");
+            },
+            Err(ref e) if would_block(e) => { 
+                // let it process other connections
+            }
+            Err(e) => {
+                panic!("Error connecting to client: {}", e);
+            }
+        };
 
-        let h = start_handler(con);
+        poll.poll(&mut events, None ).unwrap();      
+        for event in events.iter() {
+            match event.token() {
+                SERVER => {             
+                    println!("Accepted connection from");
+                    // save current connected and create new pipe
+                    let mut inner = server;  
+                    server = namedpipe.new_instance().unwrap();
+
+                    // register currently connected pipe with new token
+                    let token = next(&mut unique_token);
+                    poll.registry()
+                    .reregister(&mut inner, token, Interest::WRITABLE).unwrap();
+
+                    // register new server with the server token to send it into the connect mode. 
+                    poll.registry()
+                        .register(&mut server, SERVER, Interest::WRITABLE).unwrap();
+
+                    connections.insert(token, inner);
+                },
+                token => {
+                    let done = if let Some(connection) = connections.get_mut(&token) {
+                        match handle_connection_event(poll.registry(), connection, event) {
+                            Ok(done) => done,
+                            Err(e) => {
+                                println!("Pipe closed: {}", e);
+                                true // error occurred, so connection is done
+                            }
+                        }
+                    } else {
+                        // Sporadic events happen, we can safely ignore them.
+                        false
+                    };
+                    if done {
+                        if let Some(mut connection) = connections.remove(&token) {
+                            poll.registry().deregister(&mut connection).unwrap();
+                        }
+                    }
+                }
+            }
+        }
     }
 }
 
-fn start_handler<T: Connection+ 'static> (con: T) -> thread::JoinHandle<()>
-//where A: Connection + Send + Sync + 'static
- {
-    let newconnection = con;
-    
-    let h = thread::spawn(move || {
-        let mut connection = newconnection;
-        let mut count = 0;
-        loop {
-            let mut buf = [0; 10];
-            connection.read(&mut buf);
-
-            count += 1;
-            let message = format!("pong-{value}", value = count);
-            match connection.write(message.as_bytes()) {
-                Ok(_) => println!("Wrote to pipe"),
-                Err(e) => break,
+fn handle_connection_event(
+    registry: &Registry,
+    connection: &mut NamedPipe,
+    event: &Event,
+) -> io::Result<bool> {
+    if event.is_writable() {
+        // We can (maybe) write to the connection.
+        let message = format!("pong-{value}", value = event.token().0);
+        match connection.write(message.as_bytes()) {
+            Ok(_) => {
+                // After we've written something we'll reregister the connection
+                // to only respond to readable events.
+                registry.reregister(connection, event.token(), Interest::READABLE)?
             }
+            // Would block "errors" are the OS's way of saying that the
+            // connection is not actually ready to perform this I/O operation.
+            Err(ref err) if would_block(err) => {}
+            // Got interrupted (how rude!), we'll try again.
+            Err(ref err) if interrupted(err) => {
+                return handle_connection_event(registry, connection, event)
+            }
+            // Other errors we'll consider fatal.
+            Err(err) => return Err(err),
+        }
+    }
 
-            if count == 10 {
-                print!("killing client connection");
-                io::stdout().flush();
-                connection.close();
-                break;
+    if event.is_readable() {
+        let mut connection_closed= false;
+        let mut buf = [0; 10];
+        // We can (maybe) read from the connection.
+        loop {
+            match connection.read(&mut buf) {
+                Ok(0) => {
+                    // Reading 0 bytes means the other side has closed the
+                    // connection or is done writing, then so are we.
+                    connection_closed = true;
+                    break;
+                }
+                Ok(n) => {
+                    println!("Read from pipe: {:?}", std::str::from_utf8(&buf));
+                }
+                // Would block "errors" are the OS's way of saying that the
+                // connection is not actually ready to perform this I/O operation.
+                Err(ref err) if would_block(err) => break,
+                Err(ref err) if interrupted(err) => continue,
+                // Other errors we'll consider fatal.
+                Err(err) => return Err(err),
             }
         }
+        if connection_closed {
+            println!("Connection closed");
+            return Ok(true);
+        }
+    }
 
-        print!("disconnecting");
-        io::stdout().flush();
-    });
-
-    h
+    Ok(false)
 }
 
-// do I do clone and Arc's here?
+fn would_block(err: &io::Error) -> bool {
+    err.kind() == io::ErrorKind::WouldBlock
+}
+
+fn next(current: &mut Token) -> Token {
+    let next = current.0;
+    current.0 += 1;
+    Token(next)
+}
+
+
+fn interrupted(err: &io::Error) -> bool {
+    err.kind() == io::ErrorKind::Interrupted
+}
+
 struct PipeServer<'a> {
     firstInstance: Option<bool>,
     address: &'a str,
@@ -86,7 +192,7 @@ impl PipeServer<'_> {
         }
     }
 
-    fn new_instance(&mut self) -> io::Result<pipeinstance> {
+    fn new_instance(&mut self) -> io::Result<NamedPipe> {
         let name = OsStr::new(self.address)
             .encode_wide()
             .chain(Some(0)) // add NULL termination
@@ -124,130 +230,7 @@ impl PipeServer<'_> {
             // `unsafe`.
             let np =unsafe { NamedPipe::from_raw_handle(h as RawHandle) };
     
-            Ok(pipeinstance { namedPipe: np, poll: Poll::new().unwrap() })
+            Ok(  np)
         }
     }
 }
-
-struct pipeinstance {
-    namedPipe: NamedPipe,
-    poll: Poll,
-}
-
-impl Read for pipeinstance {
-    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-        self.poll.registry()
-                .reregister(&mut self.namedPipe, SERVER, Interest::READABLE)
-                .unwrap();
-
-        let mut events = Events::with_capacity(1024);
-        self.poll.poll(&mut events, None).unwrap();
-
-        loop {
-            match self.namedPipe.read(buf) {
-                Ok(0) => {
-                    return Err(io::Error::new(io::ErrorKind::Other, "pipe closed"));
-                }
-                Ok(x) => {
-                    print!("read: {:?}", std::str::from_utf8(&buf));
-                    
-                    return Ok(x);
-                }
-                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                    self.poll.poll(&mut events, None).unwrap();
-                    continue;
-                }
-                Err(e) => {
-                    println!("Error reading from pipe: {}", e);
-                    return Err(e)
-                }
-            }
-        }
-    }
-}
-
-impl Write for pipeinstance {
-    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-        self.poll.registry()
-        .reregister(&mut self.namedPipe, SERVER, Interest::WRITABLE)
-        .unwrap();
-
-        loop {
-            match self.namedPipe.write(buf) {
-                Ok(x) => {
-                    println!("Wrote to pipe");
-                    return Ok(x)
-                }
-                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                    println!("blocked");
-                    let mut events = Events::with_capacity(1024);
-                    self.poll.poll(&mut events, None).unwrap();
-                }
-                Err(e) if e.raw_os_error() == Some(ERROR_NO_DATA as i32) => {
-                    return Err(e)
-                }
-                Err(e) => {
-                    println!("Error writing to pipe: {}", e);
-                    return Err(e)
-                }
-            }
-        }
-    }
-
-    fn flush(&mut self) -> io::Result<()> {
-        Ok(())
-    }
-}
-    
-
-impl Close for pipeinstance {
-    fn close(&mut self) -> io::Result<()> {
-        return self.namedPipe.disconnect();
-    }
-}
-
-impl Connection for pipeinstance {}
-
-impl Listener for PipeServer<'_> {
-    type Type = pipeinstance;
-    fn Accept(&mut self) -> Result<Self::Type, io::Error> {
-        let mut pipe = self.new_instance().unwrap();
-
-        pipe.poll.registry()
-        .register(&mut pipe.namedPipe, SERVER, Interest::WRITABLE)
-        .unwrap();
-
-        println!("waiting for connection....");
-        loop {
-            match pipe.namedPipe.connect() {
-                Ok(()) => {
-                    println!("Server Connected!");
-                    return Ok(pipe);
-                },
-                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                    pipe.poll.registry()
-                        .reregister(&mut pipe.namedPipe, SERVER, Interest::WRITABLE)
-                        .unwrap();
-    
-                    let mut events = Events::with_capacity(1024);
-                    pipe.poll.poll(&mut events, None).unwrap();
-                }
-                Err(e) => {
-                    println!("Error connecting to pipe: {}", e);
-                    return Err(e);
-                }
-            }
-        }
-    }
-}
-
-trait Listener {
-    type Type: Connection;
-    fn Accept(&mut self) -> Result<Self::Type, io::Error>;
-}
-
-trait Close {
-    fn close(&mut self) -> io::Result<()>;
-}
-
-trait Connection: Close + Read + Write + Send + std::marker::Sync {}
