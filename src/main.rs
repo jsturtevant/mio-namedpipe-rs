@@ -41,7 +41,6 @@ fn main() {
 
     let mut events = Events::with_capacity(128);
 
-
     poll.registry()
     .register(&mut server, SERVER, Interest::WRITABLE).unwrap();
 
@@ -112,24 +111,7 @@ fn handle_connection_event(
     event: &Event,
 ) -> io::Result<bool> {
     if event.is_writable() {
-        // We can (maybe) write to the connection.
-        let message = format!("pong-{value}", value = event.token().0);
-        match connection.write(message.as_bytes()) {
-            Ok(_) => {
-                // After we've written something we'll reregister the connection
-                // to only respond to readable events.
-                registry.reregister(connection, event.token(), Interest::READABLE)?
-            }
-            // Would block "errors" are the OS's way of saying that the
-            // connection is not actually ready to perform this I/O operation.
-            Err(ref err) if would_block(err) => {}
-            // Got interrupted (how rude!), we'll try again.
-            Err(ref err) if interrupted(err) => {
-                return handle_connection_event(registry, connection, event)
-            }
-            // Other errors we'll consider fatal.
-            Err(err) => return Err(err),
-        }
+       
     }
 
     if event.is_readable() {
@@ -155,6 +137,31 @@ fn handle_connection_event(
                 Err(err) => return Err(err),
             }
         }
+
+        loop {
+            // We can (maybe) write to the connection.
+            let message = format!("pong-{value}", value = event.token().0);
+            match connection.write(message.as_bytes()) {
+                Ok(_) => {
+                    // After we've written something we'll reregister the connection
+                    // to only respond to readable events.
+                    registry.reregister(connection, event.token(), Interest::READABLE)?;
+                    break;
+                }
+                // Would block "errors" are the OS's way of saying that the
+                // connection is not actually ready to perform this I/O operation.
+                Err(ref err) if would_block(err) => {
+                    continue
+                }
+                // Got interrupted (how rude!), we'll try again.
+                Err(ref err) if interrupted(err) => {
+                    return handle_connection_event(registry, connection, event)
+                }
+                // Other errors we'll consider fatal.
+                Err(err) => return Err(err),
+            }
+        }
+
         if connection_closed {
             println!("Connection closed");
             return Ok(true);

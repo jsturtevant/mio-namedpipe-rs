@@ -39,7 +39,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             .reregister(&mut client, Token(1), Interest::READABLE)?;
         poll.poll(&mut events, None).unwrap();
 
-        let mut buf = [0; 6];
+        let mut buf = [0; 10];
         match client.read(&mut buf) {
             Ok(0) => {
                 println!("Read zero from pipe");
